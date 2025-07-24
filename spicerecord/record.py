@@ -591,10 +591,20 @@ def format_datasize(b):
     return '{:0.02f} {}B'.format(b, s)
 
 
-def _record(args, dom, tmpdir):
+def _record(args, dom):
     def create_ffmpeg_stream(display):
-        path = os.path.join(tmpdir, '{:03}-{}x{}.mp4'.format(
-            display.index, display.width, display.height))
+        if len(args.output.split('.')) > 1:
+            base_name = '.'.join(args.output.split('.')[:-1])
+            ext = '.' + args.output.split('.')[-1]
+        else:
+            base_name = args.output
+            ext = '.mp4'
+        
+        if display.index == 0:
+            path = args.output
+        else:
+            path = '{}-{:03}{}'.format(base_name, display.index, ext)
+        
         return FFmpegRawStream(
             path = path,
             display = display,
@@ -655,12 +665,8 @@ def _record(args, dom, tmpdir):
     displays = [d for d in sp.displays if d.frames_recorded]
 
     if len(displays) == 1 and H264_PIX_FMT_INTERMEDIATE(displays[0]) == H264_PIX_FMT_FINAL:
-        # Optimization: use the only intermediate video as the final
-        d = displays[0]
-        src = d.outfile.name
-        d.outfile = None
-        logging.info("Moving {} to {}".format(src, args.output))
-        shutil.move(src, args.output)
+        # Single display already written to final output path - no conversion needed
+        logging.info("Single display recording complete at {}".format(args.output))
 
     else:
         # Convert video
@@ -676,8 +682,4 @@ def _record(args, dom, tmpdir):
 
 
 def record(args, dom):
-    tmpdir = tempfile.mkdtemp(prefix='spice-record-')
-    try:
-        _record(args, dom, tmpdir)
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+    _record(args, dom)
