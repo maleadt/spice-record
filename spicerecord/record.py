@@ -24,6 +24,7 @@ import libvirt
 import termios
 import xml.etree.ElementTree as ET
 from urllib.parse import urlparse
+import signal
 
 from gi.repository import GLib
 from gi.repository import GObject
@@ -276,6 +277,9 @@ class SpiceRecorder(GObject.GObject):
                 self._stdin_avail_cb,
                 )
 
+        # Set up SIGINT handler to flush recording on Ctrl+C
+        signal.signal(signal.SIGINT, self._sigint_handler)
+
     def _stop_recording(self, reason=""):
         if self._record_timeout_id != None:
             logging.debug('Removing _record_timeout_id = %d', self._record_timeout_id)
@@ -315,6 +319,12 @@ class SpiceRecorder(GObject.GObject):
                 self._stop_recording("Requested by user")
 
         return True
+
+    def _sigint_handler(self, signum, frame):
+        logging.info('Stopping on SIGINT')
+        self._stop_recording("Interrupted by signal")
+        # Force immediate termination to prevent continued execution
+        sys.exit(0)
 
     @property
     def displays(self):
@@ -486,13 +496,38 @@ class FFmpegRawStream:
         return self.path
 
     def write(self, data):
-        return self.p.stdin.write(data)
+        try:
+            return self.p.stdin.write(data)
+        except BrokenPipeError:
+            # FFmpeg process has terminated, ignore writes to broken pipe
+            logging.debug('Ignoring write to broken pipe - FFmpeg process terminated')
+            return 0
 
     def close(self):
-        self.p.stdin.close()
-        rc = self.p.wait()
+        # Close stdin first
+        if self.p.stdin and not self.p.stdin.closed:
+            self.p.stdin.close()
+        
+        # Wait for process to finish, but terminate if it takes too long
+        try:
+            rc = self.p.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            logging.debug('FFmpeg process did not exit cleanly, terminating')
+            self.p.terminate()
+            try:
+                rc = self.p.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                logging.debug('FFmpeg process did not respond to terminate, killing')
+                self.p.kill()
+                rc = self.p.wait()
+        
         if rc != 0:
-            raise subprocess.CalledProcessError(rc, 'ffmpeg')
+            # FFmpeg exit code 255 typically indicates it was interrupted by signal
+            # Don't raise exception for interrupted processes during cleanup
+            if rc != 255:
+                raise subprocess.CalledProcessError(rc, 'ffmpeg')
+            else:
+                logging.debug('FFmpeg process was interrupted (exit code 255), continuing cleanup')
 
 
 def domain_extract_connect_info(domain):
